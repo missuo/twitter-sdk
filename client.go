@@ -643,7 +643,25 @@ func (c *Client) apiRequest(u, method string, body map[string]any) (map[string]a
 					}
 					continue
 				}
+				// Write operation rate limits (retweet/like/bookmark limits)
+				if int(errCode) == 348 || int(errCode) == 349 {
+					return nil, &TwitterAPIError{StatusCode: 429, Message: fmt.Sprintf("Rate limited: %s (try again later, recommended wait: 15+ minutes)", errMsg)}
+				}
 				return nil, &TwitterAPIError{StatusCode: 0, Message: fmt.Sprintf("Twitter API returned errors: %s", errMsg)}
+			}
+		}
+
+		// GraphQL write mutations may return errors nested in data
+		if dataObj, ok := parsed["data"].(map[string]any); ok {
+			for _, val := range dataObj {
+				if valMap, ok := val.(map[string]any); ok {
+					if innerErrs, ok := valMap["errors"].([]any); ok && len(innerErrs) > 0 {
+						if innerErr, ok := innerErrs[0].(map[string]any); ok {
+							innerMsg, _ := innerErr["message"].(string)
+							return nil, &TwitterAPIError{StatusCode: 0, Message: fmt.Sprintf("Twitter API: %s", innerMsg)}
+						}
+					}
+				}
 			}
 		}
 
@@ -662,6 +680,7 @@ func (c *Client) buildHeaders(method string) map[string]string {
 		"X-Twitter-Auth-Type":       "OAuth2Session",
 		"X-Twitter-Client-Language": "en",
 		"User-Agent":                userAgent,
+		"Origin":                    "https://x.com",
 		"Referer":                   "https://x.com",
 		"Accept":                    "*/*",
 		"Accept-Language":           "en-US,en;q=0.9",
@@ -978,7 +997,16 @@ func parseUserResult(userData map[string]any) *UserProfile {
 
 func buildGraphQLURL(queryID, operationName string, variables, features, fieldToggles map[string]any) string {
 	varsJSON, _ := json.Marshal(variables)
-	featJSON, _ := json.Marshal(features)
+	// Compact features: omit false values to keep URL under server limits.
+	// Twitter's API defaults missing features to False.
+	compactFeatures := make(map[string]any)
+	for k, v := range features {
+		if b, ok := v.(bool); ok && !b {
+			continue
+		}
+		compactFeatures[k] = v
+	}
+	featJSON, _ := json.Marshal(compactFeatures)
 	u := fmt.Sprintf("https://x.com/i/api/graphql/%s/%s?variables=%s&features=%s",
 		queryID, operationName,
 		url.QueryEscape(string(varsJSON)),
